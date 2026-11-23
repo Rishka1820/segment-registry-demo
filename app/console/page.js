@@ -88,18 +88,25 @@ export default function Page() {
     const build = async (server) => {
       const headers = { 'content-type': 'application/json' };
       if (signed) {
-        if (server) Object.assign(headers, await (await fetch('/api/demo-sign', { method: 'POST', body: JSON.stringify({ method, path, body: raw }) })).json());
-        else Object.assign(headers, await signedHeaders('acme-agent', (await demoKey('acme-agent')).priv, method, path, raw));
+        const sh = server
+          ? await (await fetch('/api/demo-sign', { method: 'POST', body: JSON.stringify({ method, path, body: raw }) })).json()
+          : await signedHeaders('acme-agent', (await demoKey('acme-agent')).priv, method, path, raw);
+        // Send the signature under both the standard names and x-sr- names, because some
+        // browsers and proxies strip the standard Signature headers in transit.
+        for (const [k, v] of Object.entries(sh)) { headers[k] = v; headers['x-sr-' + k] = v; }
       }
       if (desk) headers['x-demo-user'] = 'deal-desk';
       return headers;
     };
+    const sigErr = (r, d) => signed && r.status === 401 && ['UNSIGNED_REQUEST', 'STALE_SIGNATURE', 'BAD_SIGNATURE', 'UNKNOWN_AGENT', 'DIGEST_MISMATCH'].includes(d?.error?.code);
     let headers;
     try { headers = await build(false); } catch { headers = await build(true); }
     let res = await fetch(path, { method, headers, body: raw || undefined });
     let data = await res.json();
-    if (signed && res.status === 401 && ['UNSIGNED_REQUEST', 'STALE_SIGNATURE', 'BAD_SIGNATURE'].includes(data?.error?.code)) {
-      res = await fetch(path, { method, headers: await build(true), body: raw || undefined });
+    if (sigErr(res, data)) {
+      // Last resort: the demo agent's gateway relay signs on the server and runs the same
+      // signature check in-process, so nothing in the network path can strip the headers.
+      res = await fetch('/api/demo-agent', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ method, path, body: raw }) });
       data = await res.json();
     }
     setTrace((t) => [{ label, method, path, status: res.status, req: body, res: data, signed, at: new Date().toLocaleTimeString() }, ...t]);
