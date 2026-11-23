@@ -50,7 +50,7 @@ async function handle(req, ctx) {
     if (!v.valid) throw new ApiError(422, 'INVALID_SEGMENT', 'correctable', 'Fix the errors, then estimate.', { errors: v.errors });
     const budget = spendBudget(body.budget_token, who.buyer);
     const { _rows, ...est } = estimate(body.definition);
-    return json(200, { ...est, privacy_budget_left: budget.left, budget_token: budget.token, method: 'Laplace noise, epsilon 0.25 per question' });
+    return json(200, { ...est, unit: 'estimated eligible ad requests per day', period: 'trailing 7-day average, synthetic data', privacy_budget_left: budget.left, budget_token: budget.token, method: 'Laplace noise, epsilon 0.25 per question' });
   }
 
   if (key === 'POST briefs:resolve') {
