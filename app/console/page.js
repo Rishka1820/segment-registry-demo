@@ -4,11 +4,12 @@ import { demoKey, signedHeaders, canon, signText, sha256hex, merkleRoot } from '
 import { LIVE_POLICIES, RISKY_POLICIES, TOPICS, INTENTS, GEOS } from '../../lib/data.js';
 
 const SCENES = [
+  { id: 'journey', icon: '✅', title: 'Full journey: brief to activation' },
   { id: 'unsigned', icon: '🚪', title: 'Unknown agent knocks', note: 'No signature, no entry.' },
   { id: 'brief', icon: '🏃', title: 'Brief: UK trail runners', note: 'Plain English in, 3 priced segments out.' },
   { id: 'sensitive', icon: '🤰', title: 'Brief: expecting parents', note: 'Caught by meaning, not keywords. Safe alternative offered.' },
-  { id: 'nomandate', icon: '💳', title: 'Agent buys on its own', note: 'Blocked: no buyer signature, no spend.' },
-  { id: 'commit', icon: '✍️', title: 'Buyer signs, agent buys', note: 'Buyer and publisher signatures both pass. 2 publishers opt out automatically.' },
+  { id: 'nomandate', icon: '💳', title: 'Agent activates without approval', note: 'Blocked: no buyer signature, no spend.' },
+  { id: 'commit', icon: '✍️', title: 'Buyer approves, agent activates', note: 'Buyer and publisher signatures both pass. 2 publishers opt out automatically.' },
   { id: 'probe', icon: '🕵️', title: 'Agent probes for individuals', note: 'Sees only “below floor”, then runs out of questions.' },
   { id: 'policy', icon: '⚖️', title: 'Someone loosens the rules', note: 'Unsafe edit proven wrong before it ships.' },
   { id: 'tamper', icon: '🧾', title: 'Someone edits the audit log', note: 'One changed word breaks the seal.' },
@@ -22,11 +23,24 @@ const NODES = [
   ['pub', '6 · Do publishers agree?', 'Each publisher’s own signed rules'],
   ['audit', '7 · Can anyone check later?', 'Append-only log, Merkle root'],
 ];
+function outcome(status, d, path) {
+  if (d?.error) {
+    const c = d.error.code;
+    if (c === 'UNSIGNED_REQUEST') return 'Rejected (' + status + '): the request carried no signature, so the gateway turned it away.';
+    if (c === 'POLICY_SENSITIVE_MEANING') return 'Rejected (' + status + '): the brief maps to a sensitive topic' + (d.error.matched_meaning ? ' (' + d.error.matched_meaning + ')' : '') + '.' + (d.error.alternatives?.length ? ' Safe alternative: ' + d.error.alternatives[0] + '.' : '');
+    if (c === 'PRIVACY_BUDGET_EXHAUSTED') return 'Rejected (' + status + '): this buyer used up its question budget.';
+    return 'Rejected (' + status + '): ' + (d.error.detail || c);
+  }
+  if (d?.options) return d.options.length + ' options returned with a quote each (' + status + ').';
+  if (path.includes(':commit')) return 'Activated (' + status + '): segment ' + (d.segment || '') + ' is live on the deal; ' + (d.checks || []).join(', ') + '.';
+  if (path.includes('segments:estimate')) return d.below_floor ? 'Below the reach floor: no number is shown.' : 'Estimate returned as a range (' + status + ').';
+  return 'OK (' + status + ').';
+}
 function plain(t) {
   const r = t.res || {};
   if (r.error) return ({ UNSIGNED_REQUEST: 'Blocked: no signature', POLICY_SENSITIVE_MEANING: 'Blocked: sensitive topic (' + (r.error.matched_meaning || '') + ')', PRIVACY_BUDGET_EXHAUSTED: 'Blocked: question budget used up' })[r.error.code] || ('Blocked: ' + (r.error.code || '').toLowerCase().replace(/_/g, ' '));
   if (r.options) return r.options.length + ' priced options returned';
-  if (t.path.includes(':commit')) return 'Deal live. Publisher rules applied';
+  if (t.path.includes(':commit')) return 'Activated ' + (r.segment || '') + '. Publisher rules applied';
   if (t.path.includes('segments:estimate')) return r.below_floor ? 'Below floor: no number shown' : 'Noisy estimate returned';
   return 'OK';
 }
@@ -71,13 +85,26 @@ export default function Page() {
   }
   async function call(method, path, body, { signed = true, desk = false, label } = {}) {
     const raw = body ? JSON.stringify(body) : '';
-    const headers = { 'content-type': 'application/json' };
-    if (signed) Object.assign(headers, await signedHeaders('acme-agent', (await demoKey('acme-agent')).priv, method, path, raw));
-    if (desk) headers['x-demo-user'] = 'deal-desk';
-    const res = await fetch(path, { method, headers, body: raw || undefined });
-    const data = await res.json();
+    const build = async (server) => {
+      const headers = { 'content-type': 'application/json' };
+      if (signed) {
+        if (server) Object.assign(headers, await (await fetch('/api/demo-sign', { method: 'POST', body: JSON.stringify({ method, path, body: raw }) })).json());
+        else Object.assign(headers, await signedHeaders('acme-agent', (await demoKey('acme-agent')).priv, method, path, raw));
+      }
+      if (desk) headers['x-demo-user'] = 'deal-desk';
+      return headers;
+    };
+    let headers;
+    try { headers = await build(false); } catch { headers = await build(true); }
+    let res = await fetch(path, { method, headers, body: raw || undefined });
+    let data = await res.json();
+    if (signed && res.status === 401 && ['UNSIGNED_REQUEST', 'STALE_SIGNATURE', 'BAD_SIGNATURE'].includes(data?.error?.code)) {
+      res = await fetch(path, { method, headers: await build(true), body: raw || undefined });
+      data = await res.json();
+    }
     setTrace((t) => [{ label, method, path, status: res.status, req: body, res: data, signed, at: new Date().toLocaleTimeString() }, ...t]);
     setFlow((f) => flowFrom(f, path, res.status, signed));
+    setNote(outcome(res.status, data, path));
     if (data.budget_token) setBudget({ token: data.budget_token, left: data.privacy_budget_left ?? 0 });
     if (data.receipt) addReceipt(data.receipt);
     return { status: res.status, data };
@@ -99,9 +126,14 @@ export default function Page() {
 
   async function run(id) {
     const s = SCENES.find((x) => x.id === id);
-    setNote(s.note); setBusy(true); setCur(id);
+    setNote('Running: ' + s.title + '…'); setBusy(true); setCur(id);
     try {
       if (id === 'unsigned') await call('POST', '/api/v1/briefs:resolve', { brief: 'UK runners for a trail-shoe launch' }, { signed: false, label: 'Unsigned request' });
+      if (id === 'journey') {
+        const r = await resolve('UK runners for a trail-shoe launch, Nov-Dec');
+        const o = (r.options || [])[0];
+        if (o) { const m = mandate || (await signMandate()); await buy(o, m); }
+      }
       if (id === 'brief') await resolve('UK runners for a trail-shoe launch, Nov-Dec');
       if (id === 'sensitive') await resolve('expecting parents, first trimester');
       if (id === 'nomandate' || id === 'commit') {
@@ -169,8 +201,8 @@ export default function Page() {
               <button key={s.id} className={'scene' + (cur === s.id ? ' cur' : '')} disabled={busy} onClick={() => run(s.id)}><b>{i + 1}</b><span style={{flex:1}}>{s.title}</span><span style={{fontSize:20}}>{s.icon}</span></button>))}
             <h2>Or send your own brief</h2>
             <div className="row"><input value={brief} onChange={(e) => setBrief(e.target.value)} placeholder="e.g. beach holiday deals for US families" />
-              <button disabled={busy || !brief} onClick={() => { setNote('Your brief went through the same resolver and policy check.'); resolve(brief); }}>Send</button></div>
-            <h2>Buyer mandate</h2>
+              <button disabled={busy || !brief} onClick={() => { resolve(brief); }}>Send</button></div>
+            <h2>Buyer approval (signed mandate)</h2>
             <div className={'card ' + (mandate ? 'ok' : '')}>
               <div>Buyer: <b>Acme Media</b> · cap <b>$50,000</b> · categories <b>sporting_goods</b> · until <b>31 Dec 2026</b></div>
               <div className="muted">{mandate ? 'Signed by the buyer ✓' : 'Not signed yet. The agent cannot spend.'}</div>
@@ -189,8 +221,8 @@ export default function Page() {
                 <div className="card" key={o.quote.id}>
                   <b>{o.label}</b>
                   <div className="muted">{o.why[0]}</div>
-                  <div style={{display:'flex',gap:18,margin:'6px 0'}}><div><div style={{fontSize:24,fontWeight:800,letterSpacing:-1}}>{Math.round((o.quote.daily_requests.p10+o.quote.daily_requests.p90)/2000)}k</div><div className="muted">requests/day</div></div><div><div style={{fontSize:24,fontWeight:800,letterSpacing:-1,color:'var(--acc)'}}>${o.quote.avg_cpm_usd}</div><div className="muted">CPM</div></div><div><div style={{fontSize:24,fontWeight:800,letterSpacing:-1}}>{Math.round(o.quote.safari_share * 100)}%</div><div className="muted">Safari</div></div></div>
-                  <button disabled={busy} onClick={() => buy(o, mandate)}>Agent buys this</button>
+                  <div style={{display:'flex',gap:18,margin:'6px 0'}}><div><div style={{fontSize:24,fontWeight:800,letterSpacing:-1}}>{Math.round((o.quote.daily_requests.p10+o.quote.daily_requests.p90)/2000)}k</div><div className="muted">est. eligible requests/day</div></div><div><div style={{fontSize:24,fontWeight:800,letterSpacing:-1,color:'var(--acc)'}}>${o.quote.avg_cpm_usd}</div><div className="muted">CPM</div></div><div><div style={{fontSize:24,fontWeight:800,letterSpacing:-1}}>{Math.round(o.quote.safari_share * 100)}%</div><div className="muted">Safari</div></div></div>
+                  <button disabled={busy} onClick={() => buy(o, mandate)}>Approve and activate</button>
                 </div>))}</div></>)}
             <h2>What just happened <span style={{textTransform:'none',letterSpacing:0,fontWeight:400}}>(click a row for the raw request)</span></h2>
             {trace.length === 0 && <div className="muted">Nothing yet.</div>}

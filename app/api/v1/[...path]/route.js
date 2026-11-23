@@ -99,10 +99,11 @@ async function handle(req, ctx) {
     if (new Date(quote.expires_at) < new Date()) throw new ApiError(409, 'QUOTE_EXPIRED', 'correctable', 'Quote expired; resolve again for a fresh quote.');
     const mandate = await checkMandate(body.mandate, quote, agent);
     const pub = publisherCheck(quote.definition, quote.categories);
-    const activation = { activation: 'act_' + Math.random().toString(36).slice(2, 7), deal_id: body.deal_id || 'mn-demo-deal', quote: quote.id,
+    const sv = await validate(quote.definition);
+    const activation = { segment: 'seg_' + sv.hash.slice(0, 6) + '@1', label: quote.label, activation: 'act_' + Math.random().toString(36).slice(2, 7), deal_id: body.deal_id || 'mn-demo-deal', quote: quote.id,
       checks: ['agent_signature:pass', 'buyer_mandate:pass', `publisher_rules:pass (${pub.excluded_publishers.length} of ${pub.publishers_in_segment} publishers excluded by their own rules)`, 'policy:pass'],
       excluded_publishers: pub.excluded_publishers, mandate_spend_cap_usd: mandate.max_spend_usd };
-    return json(200, { ...activation, receipt: await receipt('commit', { agent: agent.id, quote: quote.id, mandate: mandate.id, activation: activation.activation }) });
+    return json(200, { ...activation, receipt: await receipt('commit', { agent: agent.id, segment: activation.segment, quote: quote.id, mandate: mandate.id, activation: activation.activation }) });
   }
 
   if (key === 'GET ' || key === 'GET index')

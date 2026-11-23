@@ -64,7 +64,7 @@ export default function Tour() {
           <div className="brand">media<i>.</i>net</div>
           <div className="kick" style={{ color: 'var(--ink)' }}>SEGMENT REGISTRY <span style={{ color: 'var(--muted)' }}>|</span> RISHIKA SRIVASTAVA</div>
         </div>
-        <div className="kick" style={{ color: 'var(--muted)' }}>{i + 1} / {STEPS.length} — {s.k}</div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}><a href="/console" className="solid">Try a targeting brief</a><div className="kick" style={{ color: 'var(--muted)' }}>Guided tour {i + 1} / {STEPS.length}</div></div>
       </header>
       <div className="tour">
         <div className="shot">
